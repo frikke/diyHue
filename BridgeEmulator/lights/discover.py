@@ -4,10 +4,10 @@ import socket
 import json
 import uuid
 from time import sleep
-from datetime import datetime
-from lights.protocols import tpkasa, wled, mqtt, hyperion, yeelight, hue, deconz, native, native_single, native_multi, tasmota, shelly, esphome, tradfri
-from services.homeAssistantWS import discover
-import HueObjects
+from datetime import datetime, timezone
+from lights.protocols import tpkasa, wled, mqtt, hyperion, yeelight, hue, deconz, native_multi, tasmota, shelly, esphome, tradfri, elgato
+from services import homeAssistantWS
+from HueObjects import Light, StreamEvent
 from functions.core import nextFreeId
 from lights.light_types import lightTypes
 logging = logManager.logger.get_logger(__name__)
@@ -28,20 +28,23 @@ def scanHost(host, port):
 
 
 def iter_ips(port):
-    argsDict = configManager.runtimeConfig.arg
-    HOST_IP = argsDict["HOST_IP"]
-    scan_on_host_ip = argsDict["scanOnHostIP"]
-    ip_range_start = argsDict["IP_RANGE_START"]
-    ip_range_end = argsDict["IP_RANGE_END"]
+    rangeConfig = bridgeConfig["config"]["IP_RANGE"]
+    HOST_IP = configManager.runtimeConfig.arg["HOST_IP"]
+    scan_on_host_ip = bridgeConfig["config"]["scanonhostip"]
+    ip_range_start = rangeConfig["IP_RANGE_START"]
+    ip_range_end = rangeConfig["IP_RANGE_END"]
+    sub_ip_range_start = rangeConfig["SUB_IP_RANGE_START"]
+    sub_ip_range_end = rangeConfig["SUB_IP_RANGE_END"]
     host = HOST_IP.split('.')
     if scan_on_host_ip:
         yield ('127.0.0.1', port)
-        return
-    for addr in range(ip_range_start, ip_range_end + 1):
-        host[3] = str(addr)
-        test_host = '.'.join(host)
-        if test_host != HOST_IP:
-            yield (test_host, port)
+    for sub_addr in range(sub_ip_range_start, sub_ip_range_end + 1):
+        host[2] = str(sub_addr)
+        for addr in range(ip_range_start, ip_range_end + 1):
+            host[3] = str(addr)
+            test_host = '.'.join(host)
+            if test_host != HOST_IP:
+                yield (test_host, port)
 
 
 def find_hosts(port):
@@ -63,7 +66,7 @@ def addNewLight(modelid, name, protocol, protocol_cfg):
         light["modelid"] = modelid
         light["protocol"] = protocol
         light["protocol_cfg"] = protocol_cfg
-        newObject = HueObjects.Light(light)
+        newObject = Light.Light(light)
         bridgeConfig["lights"][newLightID] = newObject
         bridgeConfig["groups"]["0"].add_light(newObject)
         # trigger stream messages
@@ -100,12 +103,39 @@ def manualAddLight(ip, protocol, config={}):
         config["ip"] = ip
         addNewLight(modelid, name, protocol, config)
 
+def discoveryEvent():
+    streamMessage = {"creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "data": [{
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_URL, bridgeConfig["config"]["bridgeid"] + 'zigbee_device_discovery')),
+                        "owner": {
+                            "rid": str(uuid.uuid5(uuid.NAMESPACE_URL, bridgeConfig["config"]["bridgeid"] + 'device')),
+                            "rtype": "device"
+                        },
+                        "status": bridgeConfig["config"]["zigbee_device_discovery_info"]["status"],
+                        "type": "zigbee_device_discovery"
+                        }],
+                    "id": str(uuid.uuid4()),
+                    "type": "update"
+                    }
+    StreamEvent(streamMessage)
+
+
 
 def scanForLights():  # scan for ESP8266 lights and strips
+    logging.info("scan for light")
     bridgeConfig["temp"]["scanResult"] = {"lastscan": "active"}
+    discoveryEvent()
     detectedLights = []
-    # return all host that listen on port 80
-    device_ips = find_hosts(80)
+
+    if bridgeConfig["config"]["port"]["enabled"]:
+        device_ips = []
+        for ports in bridgeConfig["config"]["port"]["ports"]:
+            # return all host that listen on ports in list config
+            device_ips += find_hosts(ports)
+    else:
+        # return all host that listen on port 80
+        device_ips = find_hosts(80)
+
     logging.info(pretty_json(device_ips))
     if bridgeConfig["config"]["mqtt"]["enabled"]:
         # brioadcast MQTT message, lights will be added by the service
@@ -113,18 +143,35 @@ def scanForLights():  # scan for ESP8266 lights and strips
     if bridgeConfig["config"]["deconz"]["enabled"]:
         deconz.discover(detectedLights, bridgeConfig["config"]["deconz"])
     if bridgeConfig["config"]["homeassistant"]["enabled"]:
-        discover(detectedLights)
-    yeelight.discover(detectedLights)
+        homeAssistantWS.discover(detectedLights)
+    if bridgeConfig["config"]["yeelight"]["enabled"]:
+        yeelight.discover(detectedLights)
     # native_multi probe all esp8266 lights with firmware from diyhue repo
-    native_multi.discover(detectedLights, device_ips)
-    tasmota.discover(detectedLights, device_ips)
-    wled.discover(detectedLights, device_ips)
-    hue.discover(detectedLights, bridgeConfig["config"]["hue"])
-    shelly.discover(detectedLights, device_ips)
-    esphome.discover(detectedLights, device_ips)
-    tradfri.discover(detectedLights, bridgeConfig["config"]["tradfri"])
-    hyperion.discover(detectedLights)
-    tpkasa.discover(detectedLights)
+    if bridgeConfig["config"]["native_multi"]["enabled"]:
+        native_multi.discover(detectedLights, device_ips)
+    if bridgeConfig["config"]["tasmota"]["enabled"]:
+        tasmota.discover(detectedLights, device_ips)
+    if bridgeConfig["config"]["wled"]["enabled"]:
+        # Most of the other discoveries are disabled by having no IP address (--disable-network-scan)
+        # But wled does an mdns discovery as well.
+        wled.discover(detectedLights, device_ips)
+    if bridgeConfig["config"]["hue"]:
+        hue.discover(detectedLights, bridgeConfig["config"]["hue"])
+    if bridgeConfig["config"]["shelly"]["enabled"]:
+        shelly.discover(detectedLights, device_ips)
+    if bridgeConfig["config"]["esphome"]["enabled"]:
+        esphome.discover(detectedLights, device_ips)
+    if bridgeConfig["config"]["tradfri"]:
+        tradfri.discover(detectedLights, bridgeConfig["config"]["tradfri"])
+    if bridgeConfig["config"]["hyperion"]["enabled"]:
+        hyperion.discover(detectedLights)
+    if bridgeConfig["config"]["tpkasa"]["enabled"]:
+        tpkasa.discover(detectedLights)
+    if bridgeConfig["config"]["elgato"]["enabled"]:
+        # Scan with port 9123 before mDNS discovery
+        elgato_ips = find_hosts(9123)
+        logging.info(pretty_json(elgato_ips))
+        elgato.discover(detectedLights, elgato_ips)
     bridgeConfig["temp"]["scanResult"]["lastscan"] = datetime.now().strftime(
         "%Y-%m-%dT%H:%M:%S")
     for light in detectedLights:
@@ -133,36 +180,46 @@ def scanForLights():  # scan for ESP8266 lights and strips
         for key, lightObj in bridgeConfig["lights"].items():
             if lightObj.protocol == light["protocol"]:
                 if light["protocol"] == "native_multi":
-                    if lightObj.protocol_cfg["mac"] == light["protocol_cfg"]["mac"] and lightObj.protocol_cfg["light_nr"] == light["protocol_cfg"]["light_nr"]:
+                    # check based on mac address and modelid
+                    if lightObj.protocol_cfg["mac"] == light["protocol_cfg"]["mac"] and lightObj.protocol_cfg["light_nr"] == light["protocol_cfg"]["light_nr"] and lightObj.modelid == light["modelid"]:
                         logging.info("Update IP for light " + light["name"])
                         lightObj.protocol_cfg["ip"] = light["protocol_cfg"]["ip"]
                         lightIsNew = False
                         break
                 elif light["protocol"] in ["yeelight", "tasmota", "tradfri", "hyperion", "tpkasa"]:
-                    if lightObj.protocol_cfg["id"] == light["protocol_cfg"]["id"]:
+                    # check based on id and modelid
+                    if lightObj.protocol_cfg["id"] == light["protocol_cfg"]["id"] and lightObj.modelid == light["modelid"]:
                         logging.info("Update IP for light " + light["name"])
                         lightObj.protocol_cfg["ip"] = light["protocol_cfg"]["ip"]
                         lightIsNew = False
                 elif light["protocol"] in ["shelly", "native", "native_single", "esphome"]:
-                    # check based on mac address
-                    if lightObj.protocol_cfg["mac"] == light["protocol_cfg"]["mac"]:
+                    # check based on mac address and modelid
+                    if lightObj.protocol_cfg["mac"] == light["protocol_cfg"]["mac"] and lightObj.modelid == light["modelid"]:
                         logging.info("Update IP for light " + light["name"])
                         lightObj.protocol_cfg["ip"] = light["protocol_cfg"]["ip"]
                         lightIsNew = False
                 elif light["protocol"] in ["hue", "deconz"]:
-                    # check based on light uniqueid
-                    if lightObj.protocol_cfg["uniqueid"] == light["protocol_cfg"]["uniqueid"]:
+                    # check based on light uniqueid and modelid
+                    if lightObj.protocol_cfg["uniqueid"] == light["protocol_cfg"]["uniqueid"]  and lightObj.modelid == light["modelid"]:
                         logging.info("Update IP for light " + light["name"])
                         lightObj.protocol_cfg["ip"] = light["protocol_cfg"]["ip"]
                         lightIsNew = False
                 elif light["protocol"] in ["wled"]:
-                    # Check mac and segment
-                    if lightObj.protocol_cfg["mac"] == light["protocol_cfg"]["mac"] and lightObj.protocol_cfg["segmentId"] == light["protocol_cfg"]["segmentId"]:
+                    # Check based on mac and segment and modelid
+                    if lightObj.protocol_cfg["mac"] == light["protocol_cfg"]["mac"] and lightObj.protocol_cfg["segmentId"] == light["protocol_cfg"]["segmentId"] and lightObj.modelid == light["modelid"]:
                         logging.info("Update IP for light " + light["name"])
                         lightObj.protocol_cfg["ip"] = light["protocol_cfg"]["ip"]
+                        lightObj.protocol_cfg["ledCount"] = light["protocol_cfg"]["ledCount"]
+                        lightObj.protocol_cfg["segment_start"] = light["protocol_cfg"]["segment_start"]
+                        lightObj.protocol_cfg["udp_port"] = light["protocol_cfg"]["udp_port"]
                         lightIsNew = False
                 elif light["protocol"] == "homeassistant_ws":
-                    if lightObj.protocol_cfg["entity_id"] == light["protocol_cfg"]["entity_id"]:
+                    # Check based on entity_id and modelid
+                    if lightObj.protocol_cfg["entity_id"] == light["protocol_cfg"]["entity_id"] and lightObj.modelid == light["modelid"]:
+                        lightIsNew = False
+                elif light["protocol"] == "elgato":
+                    # check based on mac address and modelid
+                    if lightObj.protocol_cfg['mac'] == light["protocol_cfg"]['mac'] and lightObj.modelid == light["modelid"]:
                         lightIsNew = False
         if lightIsNew:
             logging.info("Add new light " + light["name"])
@@ -170,4 +227,6 @@ def scanForLights():  # scan for ESP8266 lights and strips
                 light["modelid"], light["name"], light["protocol"], light["protocol_cfg"])
             bridgeConfig["temp"]["scanResult"][lightId] = {
                 "name": light["name"]}
+    bridgeConfig["config"]["zigbee_device_discovery_info"]["status"] = "ready"
+    discoveryEvent()
     return bridgeConfig["temp"]["scanResult"]

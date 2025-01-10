@@ -20,18 +20,11 @@ jobs:
             arch_friendly: armv6
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Enable qemu
         run: |
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-
-      - uses: satackey/action-docker-layer-caching@v0.0.8
-        continue-on-error: true
-        with:
-          key: diyhue-cache-ci-${{ matrix.arch }}-{hash}
-          restore-keys: |
-            diyhue-cache-ci-${{ matrix.arch }}-
 
       - name: Build docker image
         run: |
@@ -42,7 +35,7 @@ jobs:
           docker save --output output.tar diyhue/diyhue:ci
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: ci-${{ matrix.arch_friendly }}-${{ github.run_number }}.tar
           path: output.tar
@@ -60,7 +53,7 @@ jobs:
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
       - name: Download container artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: ci-${{ matrix.arch }}-${{ github.run_number }}.tar
 
@@ -112,7 +105,7 @@ jobs:
           fi
 
       - name: Download container artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: ci-${{ matrix.arch }}-${{ github.run_number }}.tar
 
@@ -163,7 +156,7 @@ jobs:
           fi
 
       - name: Download container artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: ci-${{ matrix.arch }}-${{ github.run_number }}.tar
 
@@ -387,6 +380,6 @@ jobs:
       matrix:
         arch: [amd64, armv7, arm64, armv6]
     steps:
-    - uses: geekyeggo/delete-artifact@v1
+    - uses: geekyeggo/delete-artifact@v5
       with:
         name: ci-${{ matrix.arch }}-${{ github.run_number }}.tar

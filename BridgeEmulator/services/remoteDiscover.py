@@ -1,12 +1,13 @@
 import logManager
 import requests
-import json
 from time import sleep
 
 logging = logManager.logger.get_logger(__name__)
 
+### This service is needed for Hue Essentials to automatically discover the diyhue instance.
+
 def runRemoteDiscover(config):
-    print("Starting remote discovery")
+    logging.info("Starting discovery service")
     url = 'https://discovery.diyhue.org'
     while True:
         try:
