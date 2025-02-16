@@ -3,9 +3,10 @@ import configManager
 import json
 import math
 import weakref
-import HueObjects
+import ssl
+from HueObjects import Sensor
 import paho.mqtt.client as mqtt
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Thread
 from time import sleep
 from functions.core import nextFreeId
@@ -13,6 +14,8 @@ from sensors.discover import addHueMotionSensor
 from sensors.sensor_types import sensorTypes
 from lights.discover import addNewLight
 from functions.rules import rulesProcessor
+from functions.behavior_instance import checkBehaviorInstances
+import requests
 
 logging = logManager.logger.get_logger(__name__)
 bridgeConfig = configManager.bridgeConfig.yaml_config
@@ -26,19 +29,171 @@ latestStates = {}
 discoveredDevices = {}
 
 
-motionSensors = ["TRADFRI motion sensor", "lumi.sensor_motion.aq2", "lumi.sensor_motion", "SML001"]
+motionSensors = ["TRADFRI motion sensor", "lumi.sensor_motion.aq2", "lumi.sensor_motion", "lumi.motion.ac02", "SML001"]
 standardSensors = {
-            "TRADFRI remote control": {
-                "dataConversion": {"rootKey": "action", "toggle": {"buttonevent": 1002}, "arrow_right_click": {"buttonevent": 5002}, "arrow_right_hold": {"buttonevent": 5001}, "arrow_left_click": {"buttonevent": 4002}, "arrow_left_hold": {"buttonevent": 4001}, "brightness_up_click": {"buttonevent": 2002}, "brightness_up_hold": {"buttonevent": 2001}, "brightness_down_click": {"buttonevent": 3002}, "brightness_down_hold": {"buttonevent": 3001}, "brightness_up_release": {"buttonevent": 2003},  "brightness_down_release": {"buttonevent": 3003}, "arrow_left_release": {"buttonevent": 4003}, "arrow_right_release": {"buttonevent": 5003}}},
-            "TRADFRI on/off switch": {
-                "dataConversion": {"rootKey": "click", "on": {"buttonevent": 1002}, "off": {"buttonevent": 2002}, "brightness_up": {"buttonevent": 1001}, "brightness_down": {"buttonevent": 2001}, "brightness_stop": {"buttonevent": 3001}}},
-            "TRADFRI wireless dimmer": {
-                "dataConversion": {"rootKey": "action", "rotate_right_quick": {"buttonevent": 1002}, "rotate_right": {"buttonevent": 2002}, "rotate_left": {"buttonevent": 3002}, "rotate_left_quick": {"buttonevent": 4002}, "rotate_stop": {}, "": {}}},
-            "RWL021": {
-            "dataConversion": {"rootKey": "action", "on_press": {"buttonevent": 1002}, "on-press": {"buttonevent": 1002}, "on_hold": {"buttonevent": 1001}, "on-hold": {"buttonevent": 1001}, "on_hold_release": {"buttonevent": 1003}, "on-hold-release": {"buttonevent": 1003},"up_press": {"buttonevent": 2000}, "up_hold": {"buttonevent": 2001}, "up-hold": {"buttonevent": 2001}, "up_hold_release": {"buttonevent": 2002}, "up-hold-release": {"buttonevent": 2002}, "down_press": {"buttonevent": 3000}, "down-press": {"buttonevent": 3000}, "down_hold": {"buttonevent": 3001}, "down-hold": {"buttonevent": 3001}, "down_hold_release": {"buttonevent": 3002}, "down-hold-release": {"buttonevent": 3002},"off_press": {"buttonevent": 4000}  ,"off-press": {"buttonevent": 4000} }}
-            }
+    "TRADFRI remote control": {
+        "dataConversion": {
+            "rootKey": "action",
+            "toggle": {"buttonevent": 1002},
+            "arrow_right_click": {"buttonevent": 5002},
+            "arrow_right_hold": {"buttonevent": 5001},
+            "arrow_left_click": {"buttonevent": 4002},
+            "arrow_left_hold": {"buttonevent": 4001},
+            "brightness_up_click": {"buttonevent": 2002},
+            "brightness_up_hold": {"buttonevent": 2001},
+            "brightness_down_click": {"buttonevent": 3002},
+            "brightness_down_hold": {"buttonevent": 3001},
+            "brightness_up_release": {"buttonevent": 2003},
+            "brightness_down_release": {"buttonevent": 3003},
+            "arrow_left_release": {"buttonevent": 4003},
+            "arrow_right_release": {"buttonevent": 5003},
+        }
+    },
+    "TRADFRI on/off switch": {
+        "dataConversion": {
+            "rootKey": "action",
+            "on": {"buttonevent": 1002},
+            "off": {"buttonevent": 2002},
+            "brightness_up": {"buttonevent": 1001},
+            "brightness_down": {"buttonevent": 2001},
+            "brightness_stop": {"buttonevent": 3001},
+        }
+    },
+    "TRADFRI wireless dimmer": {
+        "dataConversion": {
+            "rootKey": "action",
+            "rotate_right_quick": {"buttonevent": 1002},
+            "rotate_right": {"buttonevent": 2002},
+            "rotate_left": {"buttonevent": 3002},
+            "rotate_left_quick": {"buttonevent": 4002},
+            "rotate_stop": {},
+            "": {},
+        }
+    },
+    "RWL021": {
+        "dataConversion": {
+            "rootKey": "action",
+            "on_press": {"buttonevent": 1000},
+            "on-press": {"buttonevent": 1000},
+            "on_hold": {"buttonevent": 1001},
+            "on-hold": {"buttonevent": 1001},
+            "on_press_release": {"buttonevent": 1002},
+            "on-press-release": {"buttonevent": 1002},
+            "on_hold_release": {"buttonevent": 1003},
+            "on-hold-release": {"buttonevent": 1003},
+            "up_press": {"buttonevent": 2000},
+            "up-press": {"buttonevent": 2000},
+            "up_hold": {"buttonevent": 2001},
+            "up-hold": {"buttonevent": 2001},
+            "up_press_release": {"buttonevent": 2002},
+            "up-press-release": {"buttonevent": 2002},
+            "up_hold_release": {"buttonevent": 2003},
+            "up-hold-release": {"buttonevent": 2003},
+            "down_press": {"buttonevent": 3000},
+            "down-press": {"buttonevent": 3000},
+            "down_hold": {"buttonevent": 3001},
+            "down-hold": {"buttonevent": 3001},
+            "down_press_release": {"buttonevent": 3002},
+            "down-press-release": {"buttonevent": 3002},
+            "down_hold_release": {"buttonevent": 3003},
+            "down-hold-release": {"buttonevent": 3003},
+            "off_press": {"buttonevent": 4000},
+            "off-press": {"buttonevent": 4000},
+            "off_hold": {"buttonevent": 4001},
+            "off-hold": {"buttonevent": 4001},
+            "off_press_release": {"buttonevent": 4002},
+            "off-press-release": {"buttonevent": 4002},
+            "off_hold_release": {"buttonevent": 4003},
+            "off-hold-release": {"buttonevent": 4003},
+        }
+    },
+    "WXKG01LM": {
+        "dataConversion": {
+            "rootKey": "action",
+            "single": {"buttonevent": 1001},
+            "double": {"buttonevent": 1002},
+            "triple": {"buttonevent": 1003},
+            "quadruple": {"buttonevent": 1004},
+            "hold": {"buttonevent": 2001},
+            "release": {"buttonevent": 2002},
+            "release": {"many": 2003},
+        }
+    },
+    "Remote Control N2": {
+        "dataConversion": {
+            "rootKey": "action",
+            "on": {"buttonevent": 1001},
+            "off": {"buttonevent": 2001},
+            "brightness_move_up": {"buttonevent": 1002},
+            "brightness_stop": {"buttonevent": 1003},
+            "brightness_move_down": {"buttonevent": 2002},
+            "arrow_left_click": {"buttonevent": 3002},
+            "arrow_right_click": {"many": 4002},
+        }
+    },
+    "RDM002": {
+        "dataConversion": {
+            "rootKey": "action",
+            "dirKey": "action_direction",
+            "typeKey": "action_type",
+            "timeKey": "action_time",
+            "button_1_press": {"buttonevent": 1000},
+            "button_1_hold": {"buttonevent": 1001},
+            "button_1_press_release": {"buttonevent": 1002},
+            "button_1_hold_release": {"buttonevent": 1003},
+            "button_2_press": {"buttonevent": 2000},
+            "button_2_hold": {"buttonevent": 2001},
+            "button_2_press_release": {"buttonevent": 2002},
+            "button_2_hold_release": {"buttonevent": 2003},
+            "button_3_press": {"buttonevent": 3000},
+            "button_3_hold": {"buttonevent": 3001},
+            "button_3_press_release": {"buttonevent": 3002},
+            "button_3_hold_release": {"buttonevent": 3003},
+            "button_4_press": {"buttonevent": 4000},
+            "button_4_hold": {"buttonevent": 4001},
+            "button_4_press_release": {"buttonevent": 4002},
+            "button_4_hold_release": {"buttonevent": 4003},
+            "dial_rotate_left_step": {"rotaryevent": 1},
+            "dial_rotate_left_slow": {"rotaryevent": 2},
+            "dial_rotate_left_fast": {"rotaryevent": 2},
+            "dial_rotate_right_step": {"rotaryevent": 1},
+            "dial_rotate_right_slow": {"rotaryevent": 2},
+            "dial_rotate_right_fast": {"rotaryevent": 2},
+            "expectedrotation":90,
+            "expectedeventduration":400
+        }
+    },
+    "PTM 215Z": {
+        "dataConversion": {
+            "rootKey": "action",
+            "press_1": {"buttonevent": 1000},
+            "release_1": {"buttonevent": 1002},
+            "press_2": {"buttonevent": 2000},
+            "release_2": {"buttonevent": 2002},
+            "press_3": {"buttonevent": 3000},
+            "release_3": {"buttonevent": 3002},
+            "press_4": {"buttonevent": 4000},
+            "release_4": {"buttonevent": 4002},
+            "press_1_and_3": {"buttonevent": 1010},
+            "release_1_and_3": {"buttonevent": 1003},
+            "press_2_and_4": {"buttonevent": 2010},
+            "release_2_and_4": {"buttonevent": 2003},
+            "press_energy_bar": {"buttonevent": 5000},
+        }
+    },
+}
 
+
+
+# WXKG01LM MiJia wireless switch https://www.zigbee2mqtt.io/devices/WXKG01LM.html
+
+standardSensors["RWL020"] = standardSensors["RWL021"]
 standardSensors["RWL022"] = standardSensors["RWL021"]
+standardSensors["8719514440937"] = standardSensors["RDM002"]
+standardSensors["8719514440999"] = standardSensors["RDM002"]
+standardSensors["9290035001"] = standardSensors["RDM002"]
+standardSensors["9290035003"] = standardSensors["RDM002"]
+
 
 def getClient():
     return client
@@ -52,8 +207,16 @@ def longPressButton(sensor, buttonevent):
         current_time =  datetime.now()
         sensor.dxState["lastupdated"] = current_time
         rulesProcessor(sensor, current_time)
+        checkBehaviorInstances(sensor)
         sleep(0.5)
     return
+
+def streamGroupEvent(device, state):
+    for id, group in bridgeConfig["groups"].items():
+        if id != "0":
+            for light in group.lights:
+                if light().id_v1 == device.id_v1:
+                    group.genStreamEvent(state)
 
 
 def getObject(friendly_name):
@@ -82,7 +245,7 @@ def on_autodiscovery_light(msg):
     data = json.loads(msg.payload)
     logging.info("Auto discovery message on: " + msg.topic)
     #logging.debug(json.dumps(data, indent=4))
-    discoveredDevices[data['unique_id']] = data;
+    discoveredDevices[data['unique_id']] = data
     for key, data in discoveredDevices.items():
         device_new = True
         for light, obj in bridgeConfig["lights"].items():
@@ -98,14 +261,16 @@ def on_autodiscovery_light(msg):
 
             # Device capabilities
             keys = data.keys()
-            light_color = "xy" in keys and data["xy"] == True
+            light_xy = "xy" in keys and data["xy"] == True
             light_brightness = "brightness" in keys and data["brightness"] == True
             light_ct = "color_temp" in keys and data["color_temp"] == True
 
             modelid = None
-            if light_color and light_ct:
+            if light_xy and light_ct:
                 modelid = "LCT015"
-            elif light_color: # Every light as LCT001? Or also support other lights
+            elif light_xy and not light_ct:
+                modelid = "LLC010"
+            elif light_xy: # Every light as LCT001? Or also support other lights
                 modelid = "LCT001"
             elif light_ct:
                 modelid = "LTW001"
@@ -145,11 +310,12 @@ def on_message(client, userdata, msg):
                         if getObject(key["friendly_name"]) == False: ## Add the new sensor
                             logging.info("MQTT: Add new mqtt sensor " + key["friendly_name"])
                             if key["model_id"] in standardSensors:
-                                new_sensor_id = nextFreeId(bridgeConfig, "sensors")
-                                sensor_type = list(sensorTypes[key["model_id"]].keys())[0]
-                                uniqueid = convertHexToMac(key["ieee_address"]) + "-01-1000"
-                                sensorData = {"name": key["friendly_name"], "protocol": "mqtt", "modelid": key["model_id"], "type": sensor_type, "uniqueid": uniqueid,"protocol_cfg": {"friendly_name": key["friendly_name"], "ieeeAddr": key["ieee_address"], "model": key["definition"]["model"]}, "id_v1": new_sensor_id}
-                                bridgeConfig["sensors"][new_sensor_id] = HueObjects.Sensor(sensorData)
+                                for sensor_type in sensorTypes[key["model_id"]].keys():
+                                    new_sensor_id = nextFreeId(bridgeConfig, "sensors")
+                                    #sensor_type = sensorTypes[key["model_id"]][sensor]
+                                    uniqueid = convertHexToMac(key["ieee_address"]) + "-01-1000"
+                                    sensorData = {"name": key["friendly_name"], "protocol": "mqtt", "modelid": key["model_id"], "type": sensor_type, "uniqueid": uniqueid,"protocol_cfg": {"friendly_name": key["friendly_name"], "ieeeAddr": key["ieee_address"], "model": key["definition"]["model"]}, "id_v1": new_sensor_id}
+                                    bridgeConfig["sensors"][new_sensor_id] = Sensor.Sensor(sensorData)
                             ### TRADFRI Motion Sensor, Xiaomi motion sensor, etc
                             elif key["model_id"] in motionSensors:
                                     logging.info("MQTT: add new motion sensor " + key["model_id"])
@@ -168,7 +334,7 @@ def on_message(client, userdata, msg):
                     logging.info(light.name + " is unreachable")
                     light.state["reachable"] = False
             else:
-                device_friendlyname = msg.topic.split("/")[1]
+                device_friendlyname = msg.topic[msg.topic.index("/") + 1:]
                 device = getObject(device_friendlyname)
                 if device != False:
                     if device.getObjectPath()["resource"] == "sensors":
@@ -176,17 +342,17 @@ def on_message(client, userdata, msg):
                             device.config["battery"] = data["battery"]
                         if device.config["on"] == False:
                             return
-                        convertedPayload = {"lastupdated": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}
+                        convertedPayload = {"lastupdated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
                         if ("action" in data and data["action"] == "") or ("click" in data and data["click"] == ""):
                             return
                         ### If is a motion sensor update the light level and temperature
                         if device.modelid in motionSensors:
                             convertedPayload["presence"] = data["occupancy"]
-                            lightPayload = {"lastupdated": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}
+                            lightPayload = {"lastupdated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
                             lightSensor = findLightSensor(device)
                             if "temperature" in data:
                                 tempSensor = findTempSensor(device)
-                                tempSensor.state = {"temperature": int(data["temperature"] * 100), "lastupdated": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}
+                                tempSensor.state = {"temperature": int(data["temperature"] * 100), "lastupdated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
                             if "illuminance_lux" in data:
                                 hue_lightlevel = int(10000 * math.log10(data["illuminance_lux"])) if data["illuminance_lux"] != 0 else 0
                                 if hue_lightlevel > lightSensor.config["tholddark"]:
@@ -222,16 +388,23 @@ def on_message(client, userdata, msg):
                         if "buttonevent" in  convertedPayload and convertedPayload["buttonevent"] in [1001, 2001, 3001, 4001, 5001]:
                             Thread(target=longPressButton, args=[device, convertedPayload["buttonevent"]]).start()
                         rulesProcessor(device, current_time)
+                        checkBehaviorInstances(device)
                     elif device.getObjectPath()["resource"] == "lights":
                         state = {"reachable": True}
+                        v2State = {}
                         if "state" in data:
                             if data["state"] == "ON":
                                 state["on"] = True
                             else:
                                 state["on"] = False
+                            v2State.update({"on":{"on": state["on"]}})
+                            device.genStreamEvent(v2State)
                         if "brightness" in data:
                             state["bri"] = data["brightness"]
+                            v2State.update({"dimming": {"brightness": round(state["bri"] / 2.54, 2)}})
+                            device.genStreamEvent(v2State)
                         device.state.update(state)
+                        streamGroupEvent(device, v2State)
 
                 on_state_update(msg)
         except Exception as e:
@@ -269,7 +442,7 @@ def on_connect(client, userdata, flags, rc):
 
 def mqttServer():
 
-    logging.info("Strting MQTT service...")
+    logging.info("Starting MQTT service...")
     # ================= MQTT CLIENT Connection========================
     # Set user/password on client if supplied
 
@@ -278,6 +451,25 @@ def mqttServer():
 
     if bridgeConfig["config"]["mqtt"]['discoveryPrefix'] is not None:
         discoveryPrefix = bridgeConfig["config"]["mqtt"]['discoveryPrefix']
+
+    # defaults for TLS and certs
+    if 'mqttCaCerts' not in bridgeConfig["config"]["mqtt"]:
+        bridgeConfig["config"]["mqtt"]["mqttCaCerts"] = None
+    if 'mqttCertfile' not in bridgeConfig["config"]["mqtt"]:
+        bridgeConfig["config"]["mqtt"]["mqttCertfile"] = None
+    if 'mqttKeyfile' not in bridgeConfig["config"]["mqtt"]:
+        bridgeConfig["config"]["mqtt"]["mqttKeyfile"] = None
+    if 'mqttTls' not in bridgeConfig["config"]["mqtt"]:
+        bridgeConfig["config"]["mqtt"]["mqttTls"] = False
+    if 'mqttTlsInsecure' not in bridgeConfig["config"]["mqtt"]:
+        bridgeConfig["config"]["mqtt"]["mqttTlsInsecure"] = False
+    # TLS set?
+    if bridgeConfig["config"]["mqtt"]["mqttTls"]:
+        mqttTlsVersion = ssl.PROTOCOL_TLS
+        client.tls_set(ca_certs=bridgeConfig["config"]["mqtt"]["mqttCaCerts"], certfile=bridgeConfig["config"]["mqtt"]["mqttCertfile"], keyfile=bridgeConfig["config"]["mqtt"]["mqttKeyfile"], tls_version=mqttTlsVersion)
+        # allow insecure
+        if bridgeConfig["config"]["mqtt"]["mqttTlsInsecure"]:
+            client.tls_insecure_set(bridgeConfig["config"]["mqtt"]["mqttTlsInsecure"])
     # Setup handlers
     client.on_connect = on_connect
     client.on_message = on_message

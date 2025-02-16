@@ -1,14 +1,12 @@
 import socket
 import urllib.request
 import json
-import random
 import math
-import sys
 import logManager
 import requests
-from functions.colors import convert_rgb_xy, convert_xy, rgbBrightness
+from functions.colors import convert_rgb_xy, convert_xy
 from time import sleep
-from zeroconf import IPVersion, ServiceBrowser, ServiceStateChange, Zeroconf, ZeroconfServiceTypes
+from zeroconf import IPVersion, ServiceBrowser, ServiceStateChange, Zeroconf
 
 logging = logManager.logger.get_logger(__name__)
 
@@ -30,7 +28,7 @@ def discover(detectedLights, device_ips):
     logging.info('<WLED> discovery started')
     ip_version = IPVersion.V4Only
     zeroconf = Zeroconf(ip_version=ip_version)
-    services = ["_http._tcp.local."]
+    services = "_http._tcp.local."
     browser = ServiceBrowser(zeroconf, services, handlers=[on_mdns_discover])
     sleep(2)
     if len(discovered_lights) == 0:
@@ -62,10 +60,12 @@ def discover(detectedLights, device_ips):
                                "modelid": modelid,
                                "protocol_cfg": {
                                    "ip": x.ip,
-                                   "ledCount": x.ledCount,
+                                   "ledCount": x.segments[segmentid]["len"],
                                    "mdns_name": device[1],
                                    "mac": x.mac,
-                                   "segmentId": segmentid
+                                   "segmentId": segmentid,
+                                   "segment_start": x.segments[segmentid]["start"],
+                                   "udp_port": x.udpPort
                                }
                                })
                 segmentid = segmentid + 1
@@ -102,9 +102,9 @@ def send_light_data(c, light, data):
         if k == "on":
             # Handle on/off at light level
             if v:
-                state["on"] = True
+                seg["on"] = True
             else:
-                state["on"] = False
+                seg["on"] = False
         elif k == "bri":
             seg["bri"] = v+1
         elif k == "ct":
@@ -114,7 +114,7 @@ def send_light_data(c, light, data):
         elif k == "xy":
             color = convert_xy(v[0], v[1], 255)
             seg["col"] = [[color[0], color[1], color[2]]]
-        elif k == "alert":
+        elif k == "alert" and v != "none":
             state = c.getSegState(light.protocol_cfg['segmentId'])
             c.setBriSeg(0, light.protocol_cfg['segmentId'])
             sleep(0.6)
@@ -174,20 +174,15 @@ class WledDevice:
 
     def getInitialState(self):
         self.state = self.getLightState()
-        self.getSegments()
-        self.getLedCount()
-        self.getMacAddr()
-
-    def getLedCount(self):
+        self.getInfo()
+    
+    def getInfo(self):
         self.ledCount = self.state['info']['leds']['count']
-
-    def getMacAddr(self):
         self.mac = ':'.join(self.state[
                             'info']['mac'][i:i+2] for i in range(0, 12, 2))
-
-    def getSegments(self):
         self.segments = self.state['state']['seg']
         self.segmentCount = len(self.segments)
+        self.udpPort = self.state['info']['udpport']
 
     def getLightState(self):
         with urllib.request.urlopen(self.url + '/json') as resp:
@@ -196,14 +191,14 @@ class WledDevice:
 
     def getSegState(self, seg):
         state = {}
-        data = self.getLightState()['state']['seg'][seg]
-        state['bri'] = data['bri']
-        state['on'] = data['on']
-        state['bri'] = data['bri']
+        data = self.getLightState()['state']
+        seg = data['seg'][seg]
+        state['bri'] = seg['bri']
+        state['on'] = seg['on']
         # Weird division by zero when a color is 0
-        r = int(data['col'][0][0])+1
-        g = int(data['col'][0][1])+1
-        b = int(data['col'][0][2])+1
+        r = int(seg['col'][0][0])+1
+        g = int(seg['col'][0][1])+1
+        b = int(seg['col'][0][2])+1
         state['xy'] = convert_rgb_xy(r, g, b)
         state["colormode"] = "xy"
         return state

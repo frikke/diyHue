@@ -6,6 +6,7 @@ import socket, json, uuid
 from subprocess import Popen, PIPE
 from functions.colors import convert_rgb_xy, convert_xy
 import paho.mqtt.publish as publish
+import time
 logging = logManager.logger.get_logger(__name__)
 bridgeConfig = configManager.bridgeConfig.yaml_config
 
@@ -59,16 +60,23 @@ YeelightConnections = {}
 def entertainmentService(group, user):
     logging.debug("User: " + user.username)
     logging.debug("Key: " + user.client_key)
+    bridgeConfig["groups"][group.id_v1].stream["owner"] = user.username
+    bridgeConfig["groups"][group.id_v1].state = {"all_on": True, "any_on": True}
     lights_v2 = []
     lights_v1 = {}
     hueGroup  = -1
     hueGroupLights = {}
+    prev_frame_time = 0
+    new_frame_time = 0
+    non_UDP_update_counter = 0
     for light in group.lights:
         lights_v1[int(light().id_v1)] = light()
         if light().protocol == "hue" and get_hue_entertainment_group(light(), group.name) != -1: # If the lights' Hue bridge has an entertainment group with the same name as this current group, we use it to sync the lights.
             hueGroup = get_hue_entertainment_group(light(), group.name)
             hueGroupLights[int(light().protocol_cfg["id"])] = [] # Add light id to list
         bridgeConfig["lights"][light().id_v1].state["mode"] = "streaming"
+        bridgeConfig["lights"][light().id_v1].state["on"] = True
+        bridgeConfig["lights"][light().id_v1].state["colormode"] = "xy"
     v2LightNr = {}
     for channel in group.getV2Api()["channels"]:
         lightObj =  getObject(channel["members"][0]["service"]["rid"])
@@ -89,30 +97,35 @@ def entertainmentService(group, user):
 
     init = False
     frameBites = 10
-    fremeID = 1
+    frameID = 1
+    initMatchBytes = 0
     host_ip = bridgeConfig["config"]["ipaddress"]
+    p.stdout.read(1) # read one byte so the init function will correctly detect the frameBites
     try:
         while bridgeConfig["groups"][group.id_v1].stream["active"]:
+            new_frame_time = time.time()
             if not init:
-                line = p.stdout.read(200)
-                logging.debug(",".join('{:02x}'.format(x) for x in line))
-                frameBites = line[1:].find(b'\x48\x75\x65\x53\x74\x72\x65\x61\x6d') + 1
-                logging.debug("frameBites: " + str(frameBites))
-                if frameBites > 100:
-                    p.stdout.read(frameBites - (200 - frameBites)) # sync streaming bytes
-                elif frameBites > 67:
-                    p.stdout.read(frameBites - (200 - frameBites * 2)) # sync streaming bytes
+                readByte = p.stdout.read(1)
+                logging.debug(readByte)
+                if readByte in b'\x48\x75\x65\x53\x74\x72\x65\x61\x6d':
+                    initMatchBytes += 1
                 else:
-                    p.stdout.read(frameBites - (200 - frameBites * 3)) # sync streaming bytes
-                init = True
+                    initMatchBytes = 0
+                if initMatchBytes == 9:
+                    frameBites = frameID - 8
+                    logging.debug("frameBites: " + str(frameBites))
+                    p.stdout.read(frameBites - 9) # sync streaming bytes
+                    init = True
+                frameID += 1
 
             else:
                 data = p.stdout.read(frameBites)
-                logging.debug(",".join('{:02x}'.format(x) for x in data))
+                #logging.debug(",".join('{:02x}'.format(x) for x in data))
                 nativeLights = {}
                 esphomeLights = {}
                 mqttLights = []
                 wledLights = {}
+                non_UDP_lights = []
                 if data[:9].decode('utf-8') == "HueStream":
                     i = 0
                     apiVersion = 0
@@ -129,6 +142,7 @@ def entertainmentService(group, user):
                     while (i < counter):
                         light = None
                         r,g,b = 0,0,0
+                        bri = 0
                         if apiVersion == 1:
                             if (data[i+1] * 256 + data[i+2]) in channels:
                                 channels[data[i+1] * 256 + data[i+2]] += 1
@@ -163,12 +177,18 @@ def entertainmentService(group, user):
                         if light == None:
                             logging.info("error in light identification")
                             break
-                        logging.debug("Light:" + str(light.name) + " RED: " + str(r) + ", GREEN: " + str(g) + ", BLUE: " + str(b) )
+                        logging.debug("Frame: " + str(frameID) + " Light:" + str(light.name) + " RED: " + str(r) + ", GREEN: " + str(g) + ", BLUE: " + str(b) )
                         proto = light.protocol
                         if r == 0 and  g == 0 and  b == 0:
                             light.state["on"] = False
                         else:
-                            light.state.update({"on": True, "bri": int((r + g + b) / 3), "xy": convert_rgb_xy(r, g, b), "colormode": "xy"})
+                            if bri == 0:
+                                light.state.update({"on": True, "bri": int((r + g + b) / 3), "xy": convert_rgb_xy(r, g, b), "colormode": "xy"})
+                            else:
+                                light.state.update({"on": True, "bri": bri, "xy": [x, y], "colormode": "xy"})
+                            #logging.debug("in X: " + str(x) + " Y: " + str(y) + " B: " + str(bri))
+                            #logging.debug("st X: " + str(light.state["xy"][0]) + " Y: " + str(light.state["xy"][1]) + " B: " + str(light.state["bri"]))
+                            #logging.debug("co XY: " + str(convert_rgb_xy(r, g, b)) + " B: " + str((r + g + b) / 3))
                         if proto in ["native", "native_multi", "native_single"]:
                             if light.protocol_cfg["ip"] not in nativeLights:
                                 nativeLights[light.protocol_cfg["ip"]] = {}
@@ -212,23 +232,21 @@ def entertainmentService(group, user):
                         elif proto == "wled":
                             if light.protocol_cfg["ip"] not in wledLights:
                                 wledLights[light.protocol_cfg["ip"]] = {}
-                                wledLights[light.protocol_cfg["ip"]
-                                           ]["ledCount"] = light.protocol_cfg["ledCount"]
-                            wledLights[light.protocol_cfg["ip"]
-                                       ]["color"] = [r, g, b]
+                            if light.protocol_cfg["segmentId"] not in wledLights[light.protocol_cfg["ip"]]:
+                                wledLights[light.protocol_cfg["ip"]][light.protocol_cfg["segmentId"]] = {}
+                                wledLights[light.protocol_cfg["ip"]][light.protocol_cfg["segmentId"]]["ledCount"] = light.protocol_cfg["ledCount"]
+                                wledLights[light.protocol_cfg["ip"]][light.protocol_cfg["segmentId"]]["start"] = light.protocol_cfg["segment_start"]
+                                wledLights[light.protocol_cfg["ip"]][light.protocol_cfg["segmentId"]]["udp_port"] = light.protocol_cfg["udp_port"]
+                            wledLights[light.protocol_cfg["ip"]][light.protocol_cfg["segmentId"]]["color"] = [r, g, b]
                         elif proto == "hue" and int(light.protocol_cfg["id"]) in hueGroupLights:
                             hueGroupLights[int(light.protocol_cfg["id"])] = [r,g,b]
                         else:
-                            if fremeID % 4 == 0: # can use 2, 4, 6, 8, 12 => increase in case the destination device is overloaded
-                                operation = skipSimilarFrames(light.id_v1, light.state["xy"], light.state["bri"])
-                                if operation == 1:
-                                    light.setV1State({"bri": light.state["bri"], "transitiontime": 3})
-                                elif operation == 2:
-                                    light.setV1State({"xy": light.state["xy"], "transitiontime": 3})
+                            if light not in non_UDP_lights:
+                                non_UDP_lights.append(light)
 
-                        fremeID += 1
-                        if fremeID == 25:
-                            fremeID = 1
+                        frameID += 1
+                        if frameID == 25:
+                            frameID = 1
                         if apiVersion == 1:
                             i = i + 9
                         elif  apiVersion == 2:
@@ -253,16 +271,31 @@ def entertainmentService(group, user):
                             auth = {'username':bridgeConfig["config"]["mqtt"]["mqttUser"], 'password':bridgeConfig["config"]["mqtt"]["mqttPassword"]}
                         publish.multiple(mqttLights, hostname=bridgeConfig["config"]["mqtt"]["mqttServer"], port=bridgeConfig["config"]["mqtt"]["mqttPort"], auth=auth)
                     if len(wledLights) != 0:
-                        wled_udpmode = 2
+                        wled_udpmode = 4 #DNRGB mode
                         wled_secstowait = 2
                         for ip in wledLights.keys():
-                            udphead = [wled_udpmode, wled_secstowait]
-                            color = wledLights[ip]["color"] * int(wledLights[ip]["ledCount"])
-                            udpdata = bytes(udphead+color)
-                            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                            sock.sendto(udpdata, (ip, 21324))
+                            for segments in wledLights[ip]:
+                                udphead = bytes([wled_udpmode, wled_secstowait])
+                                start_seg = wledLights[ip][segments]["start"].to_bytes(2,"big")
+                                color = bytes(wledLights[ip][segments]["color"] * int(wledLights[ip][segments]["ledCount"]))
+                                udpdata = udphead+start_seg+color
+                                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                                sock.sendto(udpdata, (ip.split(":")[0], wledLights[ip][segments]["udp_port"]))
                     if len(hueGroupLights) != 0:
                         h.send(hueGroupLights, hueGroup)
+                    if len(non_UDP_lights) != 0:
+                        light = non_UDP_lights[non_UDP_update_counter]
+                        operation = skipSimilarFrames(light.id_v1, light.state["xy"], light.state["bri"])
+                        if operation == 1:
+                            light.setV1State({"bri": light.state["bri"], "transitiontime": 3})
+                        elif operation == 2:
+                            light.setV1State({"xy": light.state["xy"], "transitiontime": 3})
+                        non_UDP_update_counter = non_UDP_update_counter + 1 if non_UDP_update_counter < len(non_UDP_lights)-1 else 0
+
+                    if new_frame_time - prev_frame_time > 1:
+                        fps = 1.0 / (time.time() - new_frame_time)
+                        prev_frame_time = new_frame_time
+                        logging.info("Entertainment FPS: " + str(fps))
                 else:
                     logging.info("HueStream was missing in the frame")
                     p.kill()
@@ -274,6 +307,7 @@ def entertainmentService(group, user):
         logging.info("Entertainment Service was syncing and has timed out, stopping server and clearing state" + str(e))
 
     p.kill()
+    bridgeConfig["groups"][group.id_v1].stream["owner"] = None
     try:
         h.disconnect()
     except UnboundLocalError:

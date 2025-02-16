@@ -1,17 +1,11 @@
 import logManager
 import json
-import random
-import requests
-from datetime import datetime
-from time import strftime
-from threading import Thread
-import traceback
 
 # External
 import paho.mqtt.publish as publish
 
 # internal functions
-from functions.colors import hsv_to_rgb
+from functions.colors import hsv_to_rgb, convert_xy
 
 logging = logManager.logger.get_logger(__name__)
 
@@ -35,6 +29,13 @@ def set_light(light, data):
                 payload['brightness'] = value
             if key == "xy":
                 payload['color'] = {'x': value[0], 'y': value[1]}
+            if key == "gradient":
+                rgbs = list(map(lambda xy_record: convert_xy(xy_record['color']['xy']['x'], xy_record['color']['xy']['y'], 255), value['points']))
+                hexes = list(map(lambda rgb: 
+                    "#" + format(int(round(rgb[0])), '02x') + format(int(round(rgb[1])), '02x') + format(int(round(rgb[2])), '02x'),
+                    rgbs))
+                hexes.reverse()
+                payload['gradient'] = hexes
             if key == "ct":
                 payload["color_temp"] = value
             if key == "hue" or key == "sat":
@@ -43,6 +44,8 @@ def set_light(light, data):
                 payload['alert'] = value
             if key == "transitiontime":
                 payload['transition'] = value / 10
+            if key == "effect":
+                payload["effect"] = value
         if colorFromHsv:
             color = hsv_to_rgb(data['hue'], data['sat'], light.state["bri"])
             payload['color'] = { 'r': color[0], 'g': color[1], 'b': color[2] }
@@ -66,4 +69,4 @@ def discover(mqtt_config):
             publish.single("zigbee2mqtt/bridge/request/permit_join", json.dumps({"value": True, "time": 120}), hostname=mqtt_config["mqttServer"], port=mqtt_config["mqttPort"], auth=auth)
             publish.single("zigbee2mqtt/bridge/config/devices/get", hostname=mqtt_config["mqttServer"], port=mqtt_config["mqttPort"], auth=auth)
         except Exception as e:
-            print (str(e))
+            logging.error("MQTT publish failed: " + str(e))

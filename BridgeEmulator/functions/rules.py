@@ -1,16 +1,16 @@
 import logManager
 import configManager
-import json
+
 from datetime import datetime
 from threading import Thread
-from time import sleep, strftime
+from time import sleep
 import requests
 
 logging = logManager.logger.get_logger(__name__)
 bridgeConfig = configManager.bridgeConfig.yaml_config
 
 def checkRuleConditions(rule, device, current_time, ignore_ddx=False):
-    #logging.debug("Check " + rule.name)
+    #logging.debug("Check " + rule.id_v1)
     ddx = 0
     device_found = False
     ddx_sensor = []
@@ -19,6 +19,7 @@ def checkRuleConditions(rule, device, current_time, ignore_ddx=False):
             url_pices = condition["address"].split('/')
             if url_pices[1] == device.getObjectPath()["resource"] and url_pices[2] == device.getObjectPath()["id"]:
                 device_found = True
+                #logging.debug("device found")
             if condition["operator"] == "eq":
                 if condition["value"] == "true":
                     if not bridgeConfig[url_pices[1]][url_pices[2]].state[url_pices[4]]:
@@ -57,7 +58,7 @@ def checkRuleConditions(rule, device, current_time, ignore_ddx=False):
                     ddx = int(condition["value"][2:4]) * 3600 + int(condition["value"][5:7]) * 60 + int(condition["value"][-2:])
                     ddx_sensor = url_pices
         except Exception as e:
-            logging.debug("rule " + rule.name + " failed, reason:" + str(e))
+            logging.exception("rule " + rule.name + " failed, reason: " + str(type(e).__name__) + " " + str(e))
 
 
     if device_found:
@@ -83,6 +84,17 @@ def ddxRecheck(rule, device, current_time, ddx_delay, ddx_sensor):
             elif action["method"] == "PUT":
                 requests.put("http://localhost/api/local" + action["address"], json=action["body"], timeout=5)
 
+def threadActions(actionsToExecute):
+    sleep(0.2)
+    for action in actionsToExecute:
+        urlPrefix = "http://localhost/api/local"
+        if action["address"].startswith("http"):
+            urlPrefix = ""
+        if action["method"] == "POST":
+            requests.post( urlPrefix + action["address"], json=action["body"], timeout=5)
+        elif action["method"] == "PUT":
+            requests.put( urlPrefix + action["address"], json=action["body"], timeout=5)
+
 
 def rulesProcessor(device, current_time):
     logging.debug("Processing rules for " + device.name)
@@ -99,10 +111,7 @@ def rulesProcessor(device, current_time):
                     for action in rule.actions:
                         actionsToExecute.append(action)
                 else: #if ddx rule
-                    logging.info("ddx rule " + rule.name + " will be re validated after " + str(rule_result[1]) + " seconds")
+                    logging.info("ddx rule " + rule.id_v1 + ", name: " + rule.name + " will be re validated after " + str(rule_result[1]) + " seconds")
                     Thread(target=ddxRecheck, args=[rule, device, current_time, rule_result[1], rule_result[2]]).start()
-    for action in actionsToExecute:
-        if action["method"] == "POST":
-            requests.post("http://localhost/api/local" + action["address"], json=action["body"], timeout=5)
-        elif action["method"] == "PUT":
-            requests.put("http://localhost/api/local" + action["address"], json=action["body"], timeout=5)
+
+    Thread(target=threadActions, args=[actionsToExecute]).start()
